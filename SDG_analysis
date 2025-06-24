@@ -1,0 +1,449 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.preprocessing import StandardScaler
+from sklearn.cluster import KMeans
+from sklearn.decomposition import PCA
+import warnings
+warnings.filterwarnings('ignore')
+
+# Set up plotting style
+plt.style.use('seaborn-v0_8')
+sns.set_palette("husl")
+
+class SDGDataProcessor:
+    """
+    A class to process and analyze SDG overall scores data
+    """
+
+    def __init__(self, file_path):
+        """Initialize with file path"""
+        self.file_path = file_path
+        self.raw_data = None
+        self.cleaned_data = None
+        self.long_format_data = None
+
+    def load_data(self):
+        """Load the CSV data"""
+        try:
+            # Read the CSV file
+            self.raw_data = pd.read_csv(self.file_path)
+            print(f" Data loaded successfully: {self.raw_data.shape}")
+            print(f"Columns: {list(self.raw_data.columns)}")
+            return self.raw_data
+        except Exception as e:
+            print(f" Error loading data: {e}")
+            return None
+
+    def clean_data(self):
+        """Clean and prepare the data"""
+        if self.raw_data is None:
+            print(" No data to clean. Please load data first.")
+            return None
+
+        # Make a copy for cleaning
+        df = self.raw_data.copy()
+
+        # Check for missing values
+        print("\n Missing Values Check:")
+        missing_count = df.isnull().sum().sum()
+        print(f"Total missing values: {missing_count}")
+
+        # Display basic info about the dataset
+        print(f"\n Dataset Info:")
+        print(f"Shape: {df.shape}")
+        print(f"Countries: {df['Country'].nunique()}")
+        print(f"Years covered: 2000-2021 ({2021-2000+1} years)")
+
+        # Identify year columns (numeric columns that aren't ISO codes)
+        year_columns = [col for col in df.columns if col not in ['ISO', 'Country']]
+        print(f"Year columns: {year_columns}")
+
+        # Check data types and convert year columns to numeric if needed
+        for col in year_columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+
+        # Store cleaned data
+        self.cleaned_data = df
+        print(" Data cleaning completed!")
+
+        return self.cleaned_data
+
+    def reshape_to_long_format(self):
+        """Convert data from wide to long format for time series analysis"""
+        if self.cleaned_data is None:
+            print(" No cleaned data available. Please clean data first.")
+            return None
+
+        # Identify year columns
+        year_columns = [col for col in self.cleaned_data.columns if col not in ['ISO', 'Country']]
+
+        # Melt the dataframe
+        long_df = pd.melt(
+            self.cleaned_data,
+            id_vars=['ISO', 'Country'],
+            value_vars=year_columns,
+            var_name='Year',
+            value_name='SDG_Score'
+        )
+
+        # Convert Year to integer
+        long_df['Year'] = long_df['Year'].astype(int)
+
+        # Sort by country and year
+        long_df = long_df.sort_values(['Country', 'Year']).reset_index(drop=True)
+
+        # Calculate year-over-year change
+        long_df['Score_Change'] = long_df.groupby('Country')['SDG_Score'].diff()
+
+        # Calculate rolling averages
+        long_df['Score_3yr_MA'] = long_df.groupby('Country')['SDG_Score'].rolling(3, min_periods=1).mean().reset_index(drop=True)
+
+        self.long_format_data = long_df
+        print(" Data reshaped to long format successfully!")
+        print(f"Long format shape: {long_df.shape}")
+
+        return self.long_format_data
+
+    def analyze_trends(self):
+        """Analyze trends in SDG scores"""
+        if self.long_format_data is None:
+            print(" No long format data available.")
+            return None
+
+        df = self.long_format_data.copy()
+
+        print("\n TREND ANALYSIS")
+        print("=" * 50)
+
+        # Overall statistics
+        print(f"Average SDG Score across all countries/years: {df['SDG_Score'].mean():.2f}")
+        print(f"Score range: {df['SDG_Score'].min():.2f} - {df['SDG_Score'].max():.2f}")
+
+        # Country performance in 2021 (latest year)
+        latest_year = df['Year'].max()
+        latest_scores = df[df['Year'] == latest_year].sort_values('SDG_Score', ascending=False)
+
+        print(f"\n Top 10 Countries in {latest_year}:")
+        for i, (_, row) in enumerate(latest_scores.head(10).iterrows(), 1):
+            print(f"{i:2d}. {row['Country']}: {row['SDG_Score']:.2f}")
+
+        print(f"\n Bottom 5 Countries in {latest_year}:")
+        for i, (_, row) in enumerate(latest_scores.tail(5).iterrows(), 1):
+            print(f"{i:2d}. {row['Country']}: {row['SDG_Score']:.2f}")
+
+        # Calculate improvement over time (2000 vs 2021)
+        start_year = df['Year'].min()
+
+        start_scores = df[df['Year'] == start_year][['Country', 'SDG_Score']].rename(columns={'SDG_Score': 'Start_Score'})
+        end_scores = df[df['Year'] == latest_year][['Country', 'SDG_Score']].rename(columns={'SDG_Score': 'End_Score'})
+
+        improvement_df = pd.merge(start_scores, end_scores, on='Country')
+        improvement_df['Total_Improvement'] = improvement_df['End_Score'] - improvement_df['Start_Score']
+        improvement_df['Percent_Improvement'] = (improvement_df['Total_Improvement'] / improvement_df['Start_Score']) * 100
+
+        print(f"\n Most Improved Countries ({start_year}-{latest_year}):")
+        top_improved = improvement_df.sort_values('Total_Improvement', ascending=False).head(5)
+        for _, row in top_improved.iterrows():
+            print(f"   {row['Country']}: +{row['Total_Improvement']:.2f} points ({row['Percent_Improvement']:.1f}%)")
+
+        print(f"\n Countries with Declining Scores:")
+        declined = improvement_df[improvement_df['Total_Improvement'] < 0].sort_values('Total_Improvement').head(5)
+        for _, row in declined.iterrows():
+            print(f"   {row['Country']}: {row['Total_Improvement']:.2f} points ({row['Percent_Improvement']:.1f}%)")
+
+        return improvement_df
+
+    def create_visualizations(self):
+        """Create comprehensive visualizations"""
+        if self.long_format_data is None:
+            print(" No data available for visualization.")
+            return None
+
+        # Set up the plotting area
+        fig = plt.figure(figsize=(20, 15))
+
+        # 1. Time series for top countries
+        plt.subplot(2, 3, 1)
+        top_countries = ['Germany', 'France', 'Japan', 'Canada', 'United Kingdom']
+        for country in top_countries:
+            if country in self.long_format_data['Country'].values:
+                country_data = self.long_format_data[self.long_format_data['Country'] == country]
+                plt.plot(country_data['Year'], country_data['SDG_Score'], marker='o', linewidth=2, label=country)
+
+        plt.title('SDG Score Trends - Top Performing Countries', fontsize=14, fontweight='bold')
+        plt.xlabel('Year')
+        plt.ylabel('SDG Score')
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+
+        # 2. Emerging economies trend
+        plt.subplot(2, 3, 2)
+        emerging_countries = ['China', 'India', 'Brazil', 'Indonesia', 'South Africa']
+        for country in emerging_countries:
+            if country in self.long_format_data['Country'].values:
+                country_data = self.long_format_data[self.long_format_data['Country'] == country]
+                plt.plot(country_data['Year'], country_data['SDG_Score'], marker='s', linewidth=2, label=country)
+
+        plt.title('SDG Score Trends - Emerging Economies', fontsize=14, fontweight='bold')
+        plt.xlabel('Year')
+        plt.ylabel('SDG Score')
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+
+        # 3. Score distribution in 2021
+        plt.subplot(2, 3, 3)
+        latest_year = self.long_format_data['Year'].max()
+        latest_data = self.long_format_data[self.long_format_data['Year'] == latest_year]
+        plt.hist(latest_data['SDG_Score'], bins=15, alpha=0.7, color='skyblue', edgecolor='black')
+        plt.axvline(latest_data['SDG_Score'].mean(), color='red', linestyle='--', linewidth=2, label=f'Mean: {latest_data["SDG_Score"].mean():.1f}')
+        plt.title(f'SDG Score Distribution in {latest_year}', fontsize=14, fontweight='bold')
+        plt.xlabel('SDG Score')
+        plt.ylabel('Number of Countries')
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+
+        # 4. Improvement heatmap
+        plt.subplot(2, 3, 4)
+
+        # Calculate 5-year improvements
+        years = [2005, 2010, 2015, 2020]
+        countries_sample = ['USA', 'CHN', 'DEU', 'JPN', 'GBR', 'FRA', 'IND', 'BRA']
+
+        improvement_matrix = []
+        for country_iso in countries_sample:
+            country_improvements = []
+            country_data = self.long_format_data[self.long_format_data['ISO'] == country_iso]
+
+            for year in years:
+                start_score = country_data[country_data['Year'] == year-5]['SDG_Score'].iloc[0] if len(country_data[country_data['Year'] == year-5]) > 0 else np.nan
+                end_score = country_data[country_data['Year'] == year]['SDG_Score'].iloc[0] if len(country_data[country_data['Year'] == year]) > 0 else np.nan
+
+                if pd.notna(start_score) and pd.notna(end_score):
+                    improvement = end_score - start_score
+                else:
+                    improvement = 0
+
+                country_improvements.append(improvement)
+            improvement_matrix.append(country_improvements)
+
+        # Create country labels
+        country_labels = [self.long_format_data[self.long_format_data['ISO'] == iso]['Country'].iloc[0] for iso in countries_sample]
+
+        sns.heatmap(improvement_matrix,
+                   xticklabels=[f'{y-5}-{y}' for y in years],
+                   yticklabels=country_labels,
+                   annot=True,
+                   fmt='.1f',
+                   cmap='RdYlGn',
+                   center=0)
+        plt.title('5-Year SDG Score Improvements', fontsize=14, fontweight='bold')
+        plt.xlabel('Time Period')
+        plt.ylabel('Country')
+
+        # 5. Regional comparison (assuming regions based on country patterns)
+        plt.subplot(2, 3, 5)
+
+        # Define regions
+        regions = {
+            'Europe': ['Germany', 'France', 'United Kingdom', 'Italy'],
+            'North America': ['United States', 'Canada'],
+            'Asia': ['Japan', 'Korea, Rep.', 'China', 'India', 'Indonesia'],
+            'Latin America': ['Brazil', 'Argentina', 'Mexico'],
+            'Other': ['Australia', 'Russian Federation', 'Saudi Arabia', 'Turkey', 'South Africa']
+        }
+
+        regional_scores = []
+        regional_labels = []
+
+        for region, countries in regions.items():
+            region_data = self.long_format_data[
+                (self.long_format_data['Country'].isin(countries)) &
+                (self.long_format_data['Year'] == latest_year)
+            ]
+            if len(region_data) > 0:
+                regional_scores.append(region_data['SDG_Score'].mean())
+                regional_labels.append(region)
+
+        bars = plt.bar(regional_labels, regional_scores, color=['#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FFEAA7'])
+        plt.title(f'Average SDG Scores by Region ({latest_year})', fontsize=14, fontweight='bold')
+        plt.ylabel('Average SDG Score')
+        plt.xticks(rotation=45)
+
+        # Add value labels on bars
+        for bar, score in zip(bars, regional_scores):
+            plt.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.5, f'{score:.1f}',
+                    ha='center', va='bottom', fontweight='bold')
+
+        # 6. Score volatility (standard deviation over time)
+        plt.subplot(2, 3, 6)
+        volatility_data = self.long_format_data.groupby('Country')['SDG_Score'].std().sort_values(ascending=False)
+
+        plt.barh(range(len(volatility_data.head(10))), volatility_data.head(10).values, color='coral')
+        plt.yticks(range(len(volatility_data.head(10))), volatility_data.head(10).index)
+        plt.title('Most Volatile SDG Scores (2000-2021)', fontsize=14, fontweight='bold')
+        plt.xlabel('Standard Deviation of SDG Score')
+        plt.gca().invert_yaxis()
+
+        plt.tight_layout()
+        plt.savefig('sdg_comprehensive_analysis.png', dpi=300, bbox_inches='tight')
+        plt.show()
+
+        print(" Visualizations created successfully!")
+
+    def perform_clustering(self, n_clusters=4):
+        """Perform clustering analysis to identify collaboration patterns"""
+        if self.cleaned_data is None:
+            print(" No cleaned data available for clustering.")
+            return None
+
+        print(f"\n CLUSTERING ANALYSIS (K-Means with {n_clusters} clusters)")
+        print("=" * 60)
+
+        # Prepare data for clustering (use years 2015-2021 for recent patterns)
+        recent_years = [str(year) for year in range(2015, 2022)]
+        clustering_data = self.cleaned_data[['Country'] + recent_years].copy()
+
+        # Remove any rows with missing values
+        clustering_data = clustering_data.dropna()
+
+        # Prepare features (exclude country names)
+        features = clustering_data[recent_years].values
+
+        # Standardize the features
+        scaler = StandardScaler()
+        features_scaled = scaler.fit_transform(features)
+
+        # Perform K-means clustering
+        kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
+        clusters = kmeans.fit_predict(features_scaled)
+
+        # Add cluster labels to the data
+        clustering_data['Cluster'] = clusters
+
+        # Analyze clusters
+        print("\n Cluster Analysis:")
+        for i in range(n_clusters):
+            cluster_countries = clustering_data[clustering_data['Cluster'] == i]['Country'].tolist()
+            cluster_scores = clustering_data[clustering_data['Cluster'] == i][recent_years].mean(axis=1)
+
+            print(f"\n  Cluster {i+1} ({len(cluster_countries)} countries):")
+            print(f"   Average Score Range: {cluster_scores.min():.1f} - {cluster_scores.max():.1f}")
+            print(f"   Countries: {', '.join(cluster_countries)}")
+
+        # Perform PCA for visualization
+        pca = PCA(n_components=2)
+        features_pca = pca.fit_transform(features_scaled)
+
+        # Create clustering visualization
+        plt.figure(figsize=(12, 8))
+        colors = ['red', 'blue', 'green', 'purple', 'orange', 'brown']
+
+        for i in range(n_clusters):
+            mask = clusters == i
+            plt.scatter(features_pca[mask, 0], features_pca[mask, 1],
+                       c=colors[i], label=f'Cluster {i+1}', alpha=0.7, s=100)
+
+        # Add country labels
+        for i, country in enumerate(clustering_data['Country']):
+            plt.annotate(country, (features_pca[i, 0], features_pca[i, 1]),
+                        xytext=(5, 5), textcoords='offset points', fontsize=8, alpha=0.8)
+
+        plt.title('SDG Score Clustering Analysis (2015-2021)', fontsize=16, fontweight='bold')
+        plt.xlabel(f'First Principal Component ({pca.explained_variance_ratio_[0]:.1%} variance)')
+        plt.ylabel(f'Second Principal Component ({pca.explained_variance_ratio_[1]:.1%} variance)')
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        plt.tight_layout()
+        plt.savefig('sdg_clustering_analysis.png', dpi=300, bbox_inches='tight')
+        plt.show()
+
+        return clustering_data
+
+    def generate_insights(self):
+        """Generate key insights and recommendations"""
+        print("\n KEY INSIGHTS & RECOMMENDATIONS")
+        print("=" * 50)
+
+        if self.long_format_data is not None:
+            latest_year = self.long_format_data['Year'].max()
+            avg_score = self.long_format_data[self.long_format_data['Year'] == latest_year]['SDG_Score'].mean()
+
+            print(f"1.  CURRENT STATE ({latest_year}):")
+            print(f"   • Global average SDG score: {avg_score:.1f}/100")
+            print(f"   • Score gap between best and worst: {self.long_format_data[self.long_format_data['Year'] == latest_year]['SDG_Score'].max() - self.long_format_data[self.long_format_data['Year'] == latest_year]['SDG_Score'].min():.1f} points")
+
+            # Calculate overall trend
+            improvement_stats = self.long_format_data.groupby('Country')['Score_Change'].mean()
+            improving_countries = (improvement_stats > 0).sum()
+            total_countries = len(improvement_stats)
+
+            print(f"\n2.  TRENDS (2000-{latest_year}):")
+            print(f"   • Countries showing improvement: {improving_countries}/{total_countries} ({improving_countries/total_countries*100:.0f}%)")
+            print(f"   • Average yearly improvement: {improvement_stats.mean():.2f} points/year")
+
+            print(f"\n3.  COLLABORATION OPPORTUNITIES:")
+            print(f"   • High-scoring countries (>78) could mentor lower-scoring ones")
+            print(f"   • Focus on countries with declining trends for targeted support")
+            print(f"   • Regional partnerships could leverage geographic proximity")
+
+            print(f"\n4.  NEXT STEPS FOR SDG17 ML PROJECT:")
+            print(f"   • Use clustering results to identify natural partnership groups")
+            print(f"   • Analyze specific SDG indicators to understand improvement drivers")
+            print(f"   • Develop predictive models for future SDG performance")
+            print(f"   • Create recommendation systems for country-to-country knowledge transfer")
+
+# Usage example and main execution
+def main():
+    """Main function to demonstrate the SDG data processing pipeline"""
+
+    print(" SDG DATA PROCESSING & ANALYSIS PIPELINE")
+    print("=" * 50)
+
+    # Initialize the processor
+    processor = SDGDataProcessor('../data/SDR-2022-overall-score.csv')
+
+    # Step 1: Load data
+    print("\n1. Loading data...")
+    raw_data = processor.load_data()
+
+    if raw_data is not None:
+        # Step 2: Clean data
+        print("\n2. Cleaning data...")
+        cleaned_data = processor.clean_data()
+
+        # Step 3: Reshape to long format
+        print("\n3. Reshaping data...")
+        long_data = processor.reshape_to_long_format()
+
+        # Step 4: Analyze trends
+        print("\n4. Analyzing trends...")
+        improvement_analysis = processor.analyze_trends()
+
+        # Step 5: Create visualizations
+        print("\n5. Creating visualizations...")
+        processor.create_visualizations()
+
+        # Step 6: Perform clustering
+        print("\n6. Performing clustering analysis...")
+        clustering_results = processor.perform_clustering(n_clusters=4)
+
+        # Step 7: Generate insights
+        print("\n7. Generating insights...")
+        processor.generate_insights()
+
+        # Save processed data for ML project
+        if processor.long_format_data is not None:
+            processor.long_format_data.to_csv('data/sdg_processed_data.csv', index=False)
+            print(f"\n Processed data saved to 'data/sdg_processed_data.csv'")
+
+        if clustering_results is not None:
+            clustering_results.to_csv('data/sdg_clustering_results.csv', index=False)
+            print(f" Clustering results saved to 'data/sdg_clustering_results.csv'")
+
+    print(f"\n Analysis complete! Ready for ML modeling phase.")
+
+if __name__ == "__main__":
+    main()
+     
